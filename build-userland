@@ -32,10 +32,15 @@ allows us to build examples that rely on it.
             '--in-tree',
             default=False,
             help='''\
-Magic build mode tailored to build from within the source tree:
-
-* place build output inside soure tree to conveniently run it
-* if not targets are given, build use the current working directory
+Place build output inside soure tree to conveniently run it, especially when
+building with the host toolchain.
+''',
+        )
+        self.add_argument(
+            '--target-cwd',
+            default=False,
+            help='''\
+Treat targets as relative to the current working directory.
 ''',
         )
         self.add_argument(
@@ -80,7 +85,7 @@ Default: build all examples that have their package dependencies met, e.g.:
                     ccflags.extend(['-c', LF])
                 in_ext = os.path.splitext(in_path)[1]
                 do_compile = True
-                if in_ext == self.env['c_ext']:
+                if in_ext in (self.env['c_ext'], self.env['asm_ext']):
                     cc = self.env['gcc']
                     if cstd is None:
                         std = self.default_cstd
@@ -98,6 +103,7 @@ Default: build all examples that have their package dependencies met, e.g.:
                 else:
                     do_compile = False
                 if do_compile:
+                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
                     ret = self.sh.run_cmd(
                         (
                             [
@@ -129,19 +135,18 @@ Default: build all examples that have their package dependencies met, e.g.:
     def _get_targets(self):
         if self.env['_args_given']['targets']:
             targets = self.env['targets']
-            if self.env['in_tree']:
+            if self.env['target_cwd']:
                 cwd = os.getcwd()
                 targets = [os.path.join(cwd, target) for target in targets]
             return targets
         else:
-            if self.env['in_tree']:
+            if self.env['target_cwd']:
                 return [os.getcwd()]
             else:
                 return [self.env['userland_source_dir']]
 
     def build(self):
         build_dir = self.get_build_dir()
-        os.makedirs(build_dir, exist_ok=True)
         has_packages = set(self.env['has_package'])
         ccflags = [
             '-I', self.env['root_dir'], LF,
@@ -162,6 +167,25 @@ Default: build all examples that have their package dependencies met, e.g.:
         self._build_one(
             in_path=self.env['common_c'],
             out_path=common_obj,
+            ccflags=ccflags,
+            extra_deps=[self.env['common_h']],
+            link=False,
+        )
+        common_obj_asm = os.path.join(
+            build_dir,
+            'arch',
+            'main' + self.env['obj_ext']
+        )
+        common_obj_asm_relpath = os.path.join(
+            'arch',
+            'main' + self.env['c_ext']
+        )
+        self._build_one(
+            in_path=os.path.join(
+                self.env['userland_source_dir'],
+                common_obj_asm_relpath
+            ),
+            out_path=common_obj_asm,
             ccflags=ccflags,
             extra_deps=[self.env['common_h']],
             link=False,
@@ -195,19 +219,28 @@ Default: build all examples that have their package dependencies met, e.g.:
             target = self.resolve_userland_source(target)
             for path, in_dirnames, in_filenames in self.sh.walk(target):
                 in_dirnames.sort()
+                in_filenames.sort()
                 path_abs = os.path.abspath(path)
                 dirpath_relative_root = path_abs[rootdir_abs_len + 1:]
                 dirpath_relative_root_components = dirpath_relative_root.split(os.sep)
-                if (
-                    len(dirpath_relative_root_components) < 2 or
-                    dirpath_relative_root_components[0] != 'arch' or
-                    dirpath_relative_root_components[1] == self.env['arch']
-                ):
+                dirpath_relative_root_components_len = len(dirpath_relative_root_components)
+                do_build_dir = True
+                in_arch = False
+                if dirpath_relative_root_components_len > 0:
+                    if dirpath_relative_root_components[0] == 'arch':
+                        if dirpath_relative_root_components_len > 1:
+                            if dirpath_relative_root_components[1] == self.env['arch']:
+                                in_arch = True
+                            else:
+                                do_build_dir = False
+                        else:
+                            do_build_dir = False
+                if do_build_dir:
                     out_dir = os.path.join(
                         build_dir,
                         dirpath_relative_root
                     )
-                    os.makedirs(out_dir, exist_ok=True)
+                    common_objs_dir = [common_obj]
                     ccflags_dir = ccflags.copy()
                     if dirpath_relative_root_components == ['gcc']:
                         cstd = 'gnu11'
@@ -217,7 +250,47 @@ Default: build all examples that have their package dependencies met, e.g.:
                         cxxstd = self.default_cxxstd
                         # -pedantic complains even if we use -std=gnu11.
                         ccflags_dir.extend(['-pedantic', LF])
+                        if in_arch:
+                            ccflags_dir.extend([
+                                '-I', os.path.join(self.env['userland_source_arch_arch_dir']), LF,
+                                '-I', os.path.join(self.env['userland_source_arch_dir']), LF,
+                                '-fno-pie', LF,
+                                '-no-pie', LF,
+                            ])
+                            if 'freestanding' in dirpath_relative_root_components:
+                                common_objs_dir = []
+                                ccflags_dir.extend([
+                                    '-ffreestanding', LF,
+                                    '-nostdlib', LF,
+                                    '-static', LF,
+                                ])
+                            else:
+                                if 'c' in dirpath_relative_root_components:
+                                    common_objs_dir = []
+                                else:
+                                    common_objs_dir = [common_obj_asm]
+                            if self.env['arch'] == 'arm':
+                                ccflags_dir.extend([
+                                    '-Xassembler', '-mcpu=cortex-a72', LF,
+                                    # To prevent:
+                                    # > vfp.S: Error: selected processor does not support <FPU instruction> in ARM mode
+                                    # https://stackoverflow.com/questions/41131432/cross-compiling-error-selected-processor-does-not-support-fmrx-r3-fpexc-in/52875732#52875732
+                                    # We aim to take the most extended mode currently available that works on QEMU.
+                                    '-Xassembler', '-mfpu=crypto-neon-fp-armv8.1', LF,
+                                    '-Xassembler', '-meabi=5', LF,
+                                    # Treat inline assembly as arm instead of thumb
+                                    # The opposite of -mthumb.
+                                    '-marm', LF,
+                                    # Make gcc generate .syntax unified for inline assembly.
+                                    # However, it gets ignored if -marm is given, which a GCC bug that was recently fixed:
+                                    # https://stackoverflow.com/questions/54078112/how-to-write-syntax-unified-ual-armv7-inline-assembly-in-gcc/54132097#54132097
+                                    # So we just write divided inline assembly for now.
+                                    '-masm-syntax-unified', LF,
+                                ])
                     for in_filename in in_filenames:
+                        path_relative_root = os.path.join(dirpath_relative_root, in_filename)
+                        if path_relative_root == common_obj_asm_relpath:
+                            continue
                         in_path = os.path.join(path, in_filename)
                         in_name, in_ext = os.path.splitext(in_filename)
                         out_path = os.path.join(
@@ -260,7 +333,7 @@ Default: build all examples that have their package dependencies met, e.g.:
                                 'ccflags': ccflags_file,
                                 'cstd': cstd,
                                 'cxxstd': cxxstd,
-                                'extra_objs': [common_obj],
+                                'extra_objs': common_objs_dir,
                                 'ccflags_after': ccflags_after,
                                 'raise_on_failure': False,
                                 'thread_limiter': thread_limiter,
@@ -277,12 +350,15 @@ Default: build all examples that have their package dependencies met, e.g.:
     def clean(self):
         if self.env['in_tree']:
             for target in self._get_targets():
-                for path, dirnames, filenames in os.walk(target):
-                    filenames.sort()
-                    dirnames.sort()
-                    for filename in filenames:
-                        if os.path.splitext(filename)[1] in self.env['userland_out_exts']:
-                            self.sh.rmrf(os.path.join(path, filename))
+                if os.path.exists(target):
+                    for path, dirnames, filenames in os.walk(target):
+                        filenames.sort()
+                        dirnames.sort()
+                        for filename in filenames:
+                            if os.path.splitext(filename)[1] in self.env['userland_out_exts']:
+                                self.sh.rmrf(os.path.join(path, filename))
+                else:
+                    raise Exception('Path does not exist: ' + target)
         else:
             self.sh.rmrf(self.get_build_dir())
 

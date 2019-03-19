@@ -1076,8 +1076,8 @@ But just stick to newer and better `VExpress_GEM5_V1` unless you have a good rea
 
 When doing bare metal programming, it is likely that you will want to learn assembly language basics. Have a look at these tutorials for the userland part:
 
-* https://github.com/cirosantilli/x86-assembly-cheat
-* https://github.com/cirosantilli/arm-assembly-cheat
+* <<x86-userland-assembly>>
+* <<arm-userland-assembly>>
 
 For more information on baremetal, see the section: <<baremetal>>.
 
@@ -1086,13 +1086,54 @@ The following subjects are particularly important:
 * <<tracing>>
 * <<baremetal-gdb-step-debug>>
 
-=== User mode setup
+=== Userland content
+
+==== About the userland setup
+
+We are moving a lot of useful content into the link:userland[] directory, consolidating other userland tutorials that we had scattered around.
+
+Some of those examples have little to do with system programming, but others are strictly related, notably for system interaction and performance analysis.
+
+The problem is that it is very hard to draw the line, and we were duplicating build and test infrastructure, so we decided to just move everything here.
+
+Notable content included / moving into this repository includes:
+
+* <<arm-userland-assembly>>
+* <<x86-userland-assembly>>
+* <<c>>
+* <<cpp>>
+* <<posix>>
+* https://github.com/cirosantilli/algorithm-cheat will be good to move here for performance analysis
 
 Much like <<baremetal-setup>>, this is another fun setup that does not require Buildroot or the Linux kernel.
 
 Getting started at: <<qemu-user-mode-getting-started>>.
 
 Introduction at: <<user-mode-simulation>>.
+
+=== Userland content
+
+
+The most reproducible way to run this content, is through Buildroot build + emulation as explained in <<user-mode-setup>>.
+
+However, much of the content is highly portable, and will happily execute on your host if it matches the requirements of each directory without building Buildroot first, much as in <<prebuilt>>.
+
+This can be done in-tree with:
+
+....
+cd userland
+./build
+./c/hello.out
+./build --clean
+....
+
+Or build just one directory:
+
+....
+./build c
+....
+
+or just one executable:
 
 [[gdb]]
 == GDB step debug
@@ -13083,36 +13124,41 @@ In order to place them in the root filesystem image itself, you must also run:
 
 ===== userland directory host build
 
-It is possible to build and run some of the userland examples directly on your host:
+It is possible to build and run the userland examples directly on your host.
+
+This can be done in-tree with:
 
 ....
 cd userland
-make
-./hello.out
-make clean
+./build
+./c/hello.out
+./build --clean
 ....
 
-or more cleanly out of tree:
+Or to build just one directory:
+
+....
+./build c
+....
+
+or just one executable:
+
+....
+./build c/hello
+....
+
+Do a more clean out of tree build and run the program instead:
 
 ....
 ./build-userland --gcc-which host --userland-build-id host
 "$(./getvar --userland-build-id host userland_build_dir)/hello.out"
 ....
 
-Extra make flags may be passed as:
+Pass extra make flags: TODO
 
 ....
-./build-userland --gcc-which host --userland-build-id host-static --make-args='-B CFLAGS_EXTRA=-static'
+./build-userland --gcc-which host --userland-build-id host-static --make-args='CFLAGS_EXTRA=-static'
 "$(./getvar --userland-build-id host-static userland_build_dir)/hello.out"
-....
-
-This for example would both force a rebuild due to `-B` and link statically due to `CFLAGS_EXTRA=-static`.
-
-TODO: OpenMP does not like `-static`:
-
-....
-/usr/lib/gcc/x86_64-linux-gnu/5/libgomp.a(target.o): In function `gomp_target_init':
-(.text+0xba): warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
 ....
 
 See: https://stackoverflow.com/questions/23869981/linking-openmp-statically-with-gcc
