@@ -98,6 +98,15 @@ consts['cxx_ext'] = '.cpp'
 consts['header_ext'] = '.h'
 consts['kernel_module_ext'] = '.ko'
 consts['obj_ext'] = '.o'
+consts['userland_in_exts'] = [
+    consts['asm_ext'],
+    consts['c_ext'],
+    consts['cxx_ext'],
+]
+consts['userland_out_exts'] = [
+    consts['userland_build_ext'],
+    consts['obj_ext'],
+]
 consts['config_file'] = os.path.join(consts['data_dir'], 'config.py')
 consts['magic_fail_string'] = b'lkmc_test_fail'
 consts['baremetal_lib_basename'] = 'lib'
@@ -1043,15 +1052,6 @@ lunch aosp_{}-eng
         os.makedirs(self.env['qemu_run_dir'], exist_ok=True)
 
     @staticmethod
-    def need_rebuild(srcs, dst):
-        if not os.path.exists(dst):
-            return True
-        for src in srcs:
-            if os.path.getmtime(src) > os.path.getmtime(dst):
-                return True
-        return False
-
-    @staticmethod
     def seconds_to_hms(seconds):
         '''
         Seconds to hour:minute:seconds
@@ -1111,6 +1111,50 @@ lunch aosp_{}-eng
         argcopy.__dict__ = dict(list(defaults.items()) + list(argcopy.__dict__.items()) + list(extra_args.items()))
         return argcopy
 
+    def resolve_source(self, in_path, magic_in_dir, in_exts):
+        '''
+        Convert a path-like string to a source file to the full source path,
+        e.g. all follogin work and to do the same:
+
+        - hello
+        - hello.
+        - hello.c
+        - userland/hello
+        - userland/hello.
+        - userland/hello.c
+        - /full/path/to/userland/hello
+        - /full/path/to/userland/hello.
+        - /full/path/to/userland/hello.c
+
+        Also works on directories:
+
+        - arch
+        - userland/arch
+        - /full/path/to/userland/arch
+        '''
+        if os.path.isabs(in_path):
+            return in_path
+        else:
+            paths = [
+                os.path.join(magic_in_dir, in_path),
+                os.path.join(
+                    magic_in_dir,
+                    os.path.relpath(in_path, magic_in_dir),
+                )
+            ]
+            for path in paths:
+                name, ext = os.path.splitext(path)
+                if len(ext) > 1:
+                    try_exts = [ext]
+                else:
+                    try_exts = in_exts + ['']
+                for in_ext in try_exts:
+                    path = name + in_ext
+                    if os.path.exists(path):
+                        return path
+            if not self.env['dry_run']:
+                raise Exception('Source file not found for input: ' + in_path)
+
     def resolve_executable(self, in_path, magic_in_dir, magic_out_dir, out_ext):
         if os.path.isabs(in_path):
             return in_path
@@ -1122,19 +1166,30 @@ lunch aosp_{}-eng
                     os.path.relpath(in_path, magic_in_dir),
                 )
             ]
-            paths[:] = [os.path.splitext(path)[0] + out_ext for path in paths]
             for path in paths:
+                path = os.path.splitext(path)[0] + out_ext
                 if os.path.exists(path):
                     return path
             if not self.env['dry_run']:
                 raise Exception('Executable file not found. Tried:\n' + '\n'.join(paths))
 
-    def resolve_userland(self, path):
+    def resolve_userland_executable(self, path):
+        '''
+        Convert an userland source path-like string to an
+        absolute userland build output path.
+        '''
         return self.resolve_executable(
             path,
             self.env['userland_source_dir'],
             self.env['userland_build_dir'],
             self.env['userland_build_ext'],
+        )
+
+    def resolve_userland_source(self, path):
+        return self.resolve_source(
+            path,
+            self.env['userland_source_dir'],
+            self.env['userland_in_exts']
         )
 
     def setup(self):
@@ -1176,6 +1231,14 @@ class BuildCliFunction(LkmcCliFunction):
             help='Clean the build instead of building.',
         ),
         self.add_argument(
+            '--force-rebuild',
+            default=False,
+            help='''\
+Force rebuild even if sources didn't chage.
+TODO: not yet implemented on all scripts.
+'''
+        )
+        self.add_argument(
             '-j',
             '--nproc',
             default=multiprocessing.cpu_count(),
@@ -1197,6 +1260,16 @@ class BuildCliFunction(LkmcCliFunction):
 
     def get_build_dir(self):
         return None
+
+    def need_rebuild(self, srcs, dst):
+        if self.env['force_rebuild']:
+            return True
+        if not os.path.exists(dst):
+            return True
+        for src in srcs:
+            if os.path.getmtime(src) > os.path.getmtime(dst):
+                return True
+        return False
 
     def timed_main(self):
         '''
